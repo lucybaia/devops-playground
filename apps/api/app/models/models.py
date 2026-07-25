@@ -16,4 +16,6 @@ class Snippet(Base):
     tags: Mapped[str | None] = mapped_column(String(500), default="")
     description: Mapped[str | None] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
