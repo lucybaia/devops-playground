@@ -732,3 +732,471 @@ A container from a previous `docker run` was still using port 8000. Fix: `docker
  
 ### Stop the right container
 `docker ps` shows all running containers. Read the `NAMES` or `IMAGE` column to identify which one to stop. Stopping the wrong container (like the database instead of the old API) doesn't free the port.
+ 
+---
+ 
+## GitHub Actions
+ 
+### What it is
+GitHub's built-in CI/CD platform. It runs automated tasks (workflows) in response to events in your repository — like pushing code or opening a pull request. The machines that run your code are called **runners** (Linux VMs hosted by GitHub).
+ 
+### Workflow file
+A YAML file inside `.github/workflows/` that defines what to run and when. GitHub automatically detects and runs any `.yml` file in this directory.
+ 
+```yaml
+name: CI
+ 
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+```
+ 
+- `name` — label shown in the Actions tab
+- `on` — the event that triggers the workflow
+- `push: branches: [main]` — runs when code is pushed to the main branch
+- `pull_request: branches: [main]` — runs when a PR targets main
+### Jobs
+Independent units of work that run on separate machines. Each job gets a fresh Linux VM with nothing pre-installed.
+ 
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      ...
+ 
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      ...
+```
+ 
+- `runs-on: ubuntu-latest` — the runner OS (a fresh Ubuntu VM)
+- `needs: lint` — this job only runs if `lint` succeeds. Without `needs`, jobs run in parallel
+### Steps
+Individual commands inside a job. They run sequentially — if one fails, the rest are skipped.
+ 
+```yaml
+steps:
+  - uses: actions/checkout@v4
+ 
+  - uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+ 
+  - name: Install ruff
+    run: pip install ruff
+ 
+  - name: Lint API
+    run: ruff check apps/api/
+```
+ 
+### `uses`
+Runs a pre-built action from the GitHub marketplace. Think of it as calling a reusable function someone else wrote.
+ 
+| Action | What it does |
+|---|---|
+| `actions/checkout@v4` | Clones your repository into the runner |
+| `actions/setup-python@v5` | Installs a specific Python version |
+ 
+The `@v4` is the version of the action — like a tag or release.
+ 
+### `run`
+Executes a shell command directly on the runner.
+ 
+```yaml
+- name: Install dependencies
+  run: pip install -r requirements.txt
+ 
+- name: Run multiple commands
+  run: |
+    pip install -r requirements.txt
+    pip install -r requirements-dev.txt
+```
+ 
+The `|` (pipe) allows multiple commands in sequence. Each line runs as a separate command.
+ 
+### `with`
+Passes configuration to an action.
+ 
+```yaml
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+```
+ 
+### `working-directory`
+Changes the directory before running a command. Equivalent to `cd` before each step.
+ 
+```yaml
+- name: Run tests
+  working-directory: apps/api
+  run: pytest -v
+```
+ 
+Without this, commands run from the repository root.
+ 
+### `name`
+A label for the step — shows up in the Actions UI so you can identify what each step does when reading logs.
+ 
+---
+ 
+## Tools used in the pipeline
+ 
+### Ruff
+A fast Python linter written in Rust. Checks code for errors, style violations, and import ordering.
+ 
+```bash
+ruff check .          # check for errors
+ruff check --fix .    # auto-fix what it can (imports, newlines)
+```
+ 
+Configured via `ruff.toml`:
+ 
+```toml
+line-length = 100
+target-version = "py312"
+ 
+[lint]
+select = ["E", "F", "I", "W"]
+```
+ 
+| Rule | What it checks |
+|---|---|
+| `E` | PEP 8 style errors (line length, whitespace) |
+| `F` | Pyflakes errors (unused imports, undefined names) |
+| `I` | Import sorting (isort rules) |
+| `W` | Warnings (missing newlines, trailing whitespace) |
+ 
+### pytest
+Python testing framework. Discovers and runs test files automatically.
+ 
+```bash
+pytest -v    # -v = verbose (shows each test name and result)
+```
+ 
+Conventions:
+- Test files: `test_*.py` or `*_test.py`
+- Test functions: `def test_something():`
+- Assertions: `assert expression` — fails the test if expression is False
+### TestClient (FastAPI)
+A fake HTTP client that sends requests to your API without starting a real server.
+ 
+```python
+from fastapi.testclient import TestClient
+from app.main import app
+ 
+client = TestClient(app)
+ 
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+```
+ 
+No `uvicorn`, no port, no browser — it calls the API directly in memory.
+ 
+---
+ 
+## Support files
+ 
+### `requirements-dev.txt`
+Development-only dependencies. Kept separate from `requirements.txt` so production images don't include testing and linting tools.
+ 
+```
+ruff
+pytest
+httpx
+```
+ 
+- `httpx` — HTTP client required by FastAPI's TestClient internally
+### `conftest.py`
+pytest's configuration file. Runs before any test. We use it to add the project root to the Python path so `from app.main import app` works in CI.
+ 
+```python
+import sys
+from pathlib import Path
+ 
+sys.path.insert(0, str(Path(__file__).parent))
+```
+ 
+This is needed because the CI runner starts pytest from the `apps/api/` directory, but Python doesn't automatically know that `app` is a package inside it. Locally it works because uvicorn adds the directory to the path — pytest doesn't.
+ 
+### `ruff.toml`
+Ruff configuration file. Lives in `apps/api/` (next to the code it lints). Controls which rules to enforce and formatting preferences.
+ 
+---
+ 
+## Concepts
+ 
+### CI (Continuous Integration)
+The practice of automatically verifying every code change. When you push, the CI pipeline runs linters and tests. If anything fails, you know immediately — before the bad code reaches production.
+ 
+The workflow: **push → lint → test → pass/fail**. No human has to remember to run the tests. The machine does it every time.
+ 
+### Pipeline
+A sequence of automated steps that run in order. In our case: lint first, then test (because there's no point testing code that doesn't even pass the linter).
+ 
+### Green build
+When all jobs pass. The green checkmark on the commit in GitHub means the code is verified. A red X means something failed — click it to see the logs and find out what broke.
+ 
+---
+ 
+## Lessons learned
+ 
+### "ModuleNotFoundError: No module named 'app'" in CI
+The test worked locally but failed in CI because the Python path was different. Fix: add `conftest.py` with `sys.path.insert`. The CI runner is a clean machine — it knows nothing about your local setup.
+ 
+### Trailing newlines
+Most linters expect files to end with a newline character. It's a Unix convention. When creating files on Windows, editors sometimes skip it. Fix: run `ruff check --fix .` before every commit.
+ 
+### Pre-commit habit
+Before every `git commit`, run:
+```bash
+ruff check --fix .    # auto-fix
+ruff check .          # verify
+pytest -v             # run tests
+```
+If all three pass locally, the CI will pass too. Catching errors before pushing saves time and keeps the commit history clean.
+ 
+---
+ 
+## Kubernetes — What it is
+ 
+A container orchestrator. Docker runs containers — Kubernetes manages them: decides where they run, restarts them if they crash, scales them up or down, and handles networking between them. Think of Docker as a single musician and Kubernetes as the conductor of the orchestra.
+ 
+In production, Kubernetes runs on real servers in the cloud. Locally, we use **kind** to simulate that environment inside Docker.
+ 
+---
+ 
+## Architecture — How the pieces fit
+ 
+```
+Your machine (Windows)
+  └── Docker Desktop
+        └── kind-node (container pretending to be a server)
+              └── Kubernetes
+                    ├── pod: api
+                    └── pod: db
+```
+ 
+The kind-node is not Docker-inside-Docker. It's a Docker container simulating a Linux server, and Kubernetes inside it uses **containerd** (a different container runtime) to manage pods. In the cloud, the kind-node would be a real server.
+ 
+---
+ 
+## Tools
+ 
+### `kind` (Kubernetes IN Docker)
+Creates a local Kubernetes cluster using Docker containers as nodes.
+ 
+```powershell
+kind create cluster --name devstation    # create a cluster
+kind delete cluster --name devstation    # delete it
+kind load docker-image myapp:latest --name devstation  # load a local image into the cluster
+```
+ 
+The `kind load` step is important: the kind cluster has its own image registry, separate from Docker Desktop. If you don't load the image, Kubernetes can't find it.
+ 
+### `kubectl` (Kubernetes CLI)
+The command-line tool for talking to Kubernetes. Every interaction with the cluster goes through it.
+ 
+```powershell
+kubectl cluster-info       # show cluster connection details
+kubectl get nodes          # list the servers in the cluster
+kubectl get pods           # list running pods
+kubectl get services       # list services
+kubectl apply -f file.yaml # create or update resources from a manifest
+kubectl delete -f file.yaml # delete resources defined in a manifest
+kubectl logs -l app=api    # show logs from pods with label app=api
+kubectl port-forward service/api 8000:8000  # tunnel traffic to a service
+```
+ 
+---
+ 
+## Core concepts
+ 
+### Pod
+The smallest unit in Kubernetes. A pod wraps one or more containers and gives them a shared network and storage. In practice, most pods run a single container.
+ 
+You don't create pods directly — you create Deployments, and Kubernetes creates the pods for you.
+ 
+```powershell
+kubectl get pods
+# NAME                   READY   STATUS    RESTARTS   AGE
+# api-6b55c847b4-fdx64   1/1     Running   0          5m
+# db-7fddfdd557-b68gw    1/1     Running   0          5m
+```
+ 
+- `READY 1/1` — 1 container running out of 1 expected
+- `STATUS Running` — the pod is alive
+- `RESTARTS` — how many times Kubernetes restarted the pod (happens automatically on crashes)
+### Deployment
+Tells Kubernetes "I want N copies of this container running at all times." If a pod crashes, the Deployment creates a new one automatically.
+ 
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: devstation-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: postgresql://devstation:changeme@db:5432/devstation
+```
+ 
+### Deployment — field by field
+ 
+| Field | What it does |
+|---|---|
+| `apiVersion: apps/v1` | Which Kubernetes API to use for this resource |
+| `kind: Deployment` | The type of resource you're creating |
+| `metadata.name` | Name of this Deployment |
+| `metadata.labels` | Key-value tags for organizing and selecting resources |
+| `spec.replicas` | How many pod copies to run (1 = single instance) |
+| `spec.selector.matchLabels` | How the Deployment finds its pods (must match template labels) |
+| `spec.template` | The pod blueprint — what to run inside each replica |
+| `spec.template.metadata.labels` | Labels on the pod (must match selector) |
+| `spec.template.spec.containers` | List of containers in the pod |
+| `containers[].image` | Docker image to use |
+| `containers[].imagePullPolicy: Never` | Don't try to download the image — use the local one loaded via `kind load` |
+| `containers[].ports` | Ports the container listens on |
+| `containers[].env` | Environment variables passed to the container |
+ 
+### Service
+Gives pods a stable network address. Pods are ephemeral — they get random names and IPs that change on every restart. A Service provides a fixed DNS name that other pods can use.
+ 
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+spec:
+  selector:
+    app: db
+  ports:
+    - port: 5432
+      targetPort: 5432
+```
+ 
+| Field | What it does |
+|---|---|
+| `metadata.name` | The DNS name other pods use to reach this service (`db` becomes the hostname) |
+| `spec.selector` | Which pods this Service routes traffic to (matches pod labels) |
+| `ports[].port` | Port the Service listens on |
+| `ports[].targetPort` | Port on the actual pod container |
+ 
+This is why `DATABASE_URL` uses `@db:5432` — `db` is the Service name, and Kubernetes resolves it to the Postgres pod's IP automatically. Same concept as Docker Compose service names, but managed by Kubernetes DNS.
+ 
+### Labels and selectors
+The glue that connects everything. Labels are key-value pairs on resources. Selectors filter resources by their labels.
+ 
+```
+Deployment (selector: app=api) ──finds──> Pods (label: app=api)
+Service    (selector: app=db)  ──routes──> Pods (label: app=db)
+```
+ 
+If the labels don't match the selector, Kubernetes can't connect the pieces and nothing works.
+ 
+---
+ 
+## The `---` separator
+ 
+In YAML, `---` separates multiple documents in one file. We use it to put a Deployment and a Service in the same file:
+ 
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  ...
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  ...
+```
+ 
+`kubectl apply -f` reads both and creates both resources.
+ 
+---
+ 
+## Commands used
+ 
+### `kubectl apply -f`
+Creates or updates resources from a YAML file. If the resource already exists, it updates it. If not, it creates it.
+ 
+```powershell
+kubectl apply -f k8s/base/api/deployment.yaml
+# deployment.apps/api created
+# service/api created
+```
+ 
+### `kubectl get pods`
+Lists all pods and their status.
+ 
+### `kubectl logs`
+Shows the stdout of a pod (what it printed to the terminal). Useful for debugging.
+ 
+```powershell
+kubectl logs -l app=api         # logs from pods with label app=api
+kubectl logs -l app=api -f      # follow (live tail)
+kubectl logs api-6b55c847b4-fdx64  # logs from a specific pod by name
+```
+ 
+### `kubectl port-forward`
+Creates a tunnel from your machine to a Service or Pod inside the cluster. Required because the cluster network is isolated — your browser can't reach pods directly.
+ 
+```powershell
+kubectl port-forward service/api 8000:8000
+```
+ 
+- `service/api` — forward to the Service named "api"
+- `8000:8000` — local port 8000 → service port 8000
+- The command runs in the foreground — keep the terminal open while using it
+---
+ 
+## Docker Compose vs Kubernetes
+ 
+| | Docker Compose | Kubernetes |
+|---|---|---|
+| **Config file** | `docker-compose.yml` | YAML manifests in `k8s/` |
+| **Runs on** | Single machine | Cluster of machines |
+| **Restart on crash** | Only if configured | Automatic (Deployments) |
+| **Scaling** | Manual (`replicas` in compose) | `kubectl scale` or autoscaler |
+| **Networking** | Service names as hostnames | Service names as DNS, same idea |
+| **Storage** | Docker volumes | PersistentVolumeClaims |
+| **Use case** | Local development | Staging and production |
+ 
+You'll keep using Docker Compose for local dev (it's faster) and Kubernetes for anything beyond that.
+ 
+---
+ 
+## Lessons learned
+ 
+### API crashed before the database was ready
+The API pod started and tried to connect to Postgres, but the database pod was still being created (`ContainerCreating`). Kubernetes automatically restarted the API pod — after 2 restarts, the database was ready and the API connected successfully. This is expected behavior: Kubernetes doesn't have `depends_on` like Docker Compose, so pods need to handle transient connection failures gracefully.
+ 
+### `imagePullPolicy: Never`
+Without this, Kubernetes tries to pull the image from Docker Hub (the public registry). Since `devstation-api:latest` only exists locally (loaded via `kind load`), the pull fails. Setting `Never` tells Kubernetes to use the image already present in the node.
