@@ -1200,3 +1200,221 @@ The API pod started and tried to connect to Postgres, but the database pod was s
  
 ### `imagePullPolicy: Never`
 Without this, Kubernetes tries to pull the image from Docker Hub (the public registry). Since `devstation-api:latest` only exists locally (loaded via `kind load`), the pull fails. Setting `Never` tells Kubernetes to use the image already present in the node.
+ 
+---
+ 
+## GitOps — What it is
+ 
+A practice where **Git is the single source of truth** for your infrastructure. Instead of running commands manually (`kubectl apply`), you push changes to Git and an agent (ArgoCD) applies them to the cluster automatically.
+ 
+The flow:
+ 
+```
+You edit k8s/base/api/deployment.yaml
+  → git push
+    → ArgoCD detects the change
+      → ArgoCD applies it to the cluster
+        → Done. No manual intervention.
+```
+ 
+If someone changes something directly in the cluster (bypassing Git), ArgoCD detects the drift and reverts it. Git always wins.
+ 
+---
+ 
+## ArgoCD — What it is
+ 
+A Kubernetes-native continuous delivery tool. It watches a Git repository and keeps the cluster in sync with what's defined in the manifests. It has a web UI that shows the full resource tree of your application.
+ 
+---
+ 
+## Installation
+ 
+ArgoCD runs inside the cluster, in its own namespace.
+ 
+```powershell
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+```
+ 
+### Namespace
+A way to organize resources inside a Kubernetes cluster. Like folders on a file system. ArgoCD lives in the `argocd` namespace so it doesn't mix with your application resources in `default`.
+ 
+```powershell
+kubectl get pods -n argocd       # list pods in the argocd namespace
+kubectl get pods                 # list pods in the default namespace
+```
+ 
+The `-n` flag specifies which namespace to target.
+ 
+### Accessing the UI
+ 
+```powershell
+# Get the admin password
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | ForEach-Object { [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($_)) }
+ 
+# Forward the UI to your browser
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+```
+ 
+Then open `https://localhost:8080`. Login: `admin` + the password from the command above. The certificate warning is normal — it's a self-signed cert.
+ 
+---
+ 
+## Application manifest
+ 
+The `Application` is a custom Kubernetes resource that tells ArgoCD what to watch and where to deploy.
+ 
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devstation
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lucybaia/devops-playground.git
+    targetRevision: main
+    path: k8s/base
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+ 
+### Field by field
+ 
+| Field | What it does |
+|---|---|
+| `apiVersion: argoproj.io/v1alpha1` | ArgoCD's custom API (not built into Kubernetes — installed with ArgoCD) |
+| `kind: Application` | A custom resource type that only exists because ArgoCD is installed |
+| `metadata.name` | Name shown in the ArgoCD UI |
+| `metadata.namespace: argocd` | Must be in the argocd namespace |
+| `spec.project: default` | ArgoCD project (a way to group applications — `default` is fine for now) |
+| `source.repoURL` | The Git repository to watch |
+| `source.targetRevision: main` | Which branch to track |
+| `source.path: k8s/base` | Which folder in the repo contains the manifests |
+| `source.directory.recurse: true` | Read subdirectories too (api/, database/) |
+| `destination.server` | The cluster to deploy to (`kubernetes.default.svc` = the local cluster) |
+| `destination.namespace: default` | Which namespace to create resources in |
+| `syncPolicy.automated` | Apply changes automatically (no manual sync needed) |
+| `syncPolicy.automated.prune: true` | Delete resources that were removed from Git |
+| `syncPolicy.automated.selfHeal: true` | Revert manual changes in the cluster back to what Git says |
+ 
+---
+ 
+## ArgoCD UI — What you see
+ 
+The resource tree shows the hierarchy of everything ArgoCD manages:
+ 
+```
+Application (devstation)
+├── Service (api)
+├── Service (db)
+├── Deployment (api)
+│   └── ReplicaSet (api-6b55c847b4)
+│       └── Pod (api-6b55c847b4-fdx64)
+└── Deployment (db)
+    └── ReplicaSet (db-7fddfdd557)
+        └── Pod (db-7fddfdd557-b68gw)
+```
+ 
+### Status indicators
+ 
+| Icon | Meaning |
+|---|---|
+| Green heart | Healthy — the resource is working |
+| Green checkmark | Synced — matches what's in Git |
+| Yellow circle | Progressing — still being applied |
+| Red heart | Degraded — something is wrong |
+| Orange | OutOfSync — the cluster differs from Git |
+ 
+### UI buttons
+ 
+| Button | What it does |
+|---|---|
+| SYNC | Manually trigger a sync (apply Git state to cluster) |
+| REFRESH | Re-read the Git repo and check for differences |
+| DIFF | Show what's different between Git and the cluster |
+| HISTORY AND ROLLBACK | See past syncs and revert to a previous state |
+| DELETE | Remove the Application and all its resources |
+ 
+---
+ 
+## Key concepts
+ 
+### Sync
+The act of applying the Git state to the cluster. With `automated` sync policy, this happens automatically. Without it, you'd need to click SYNC manually.
+ 
+### Prune
+When you delete a manifest from Git and push, ArgoCD removes the corresponding resource from the cluster. Without `prune: true`, deleted manifests would leave orphan resources running.
+ 
+### Self-heal
+If someone runs `kubectl edit` or `kubectl delete` directly (bypassing Git), ArgoCD detects the difference and restores the resource to match Git. The cluster always converges to the Git state.
+ 
+### Drift
+When the cluster state doesn't match Git. ArgoCD shows this as "OutOfSync". With self-heal enabled, drift is automatically corrected.
+ 
+---
+ 
+## Commands used
+ 
+### `kubectl create namespace`
+Creates a namespace (a logical partition inside the cluster).
+ 
+```powershell
+kubectl create namespace argocd
+```
+ 
+### `kubectl rollout restart`
+Restarts all pods in a Deployment gracefully (one by one, no downtime).
+ 
+```powershell
+kubectl rollout restart deployment argocd-repo-server -n argocd
+```
+ 
+Useful when a pod is in a bad state (like the DNS error we hit).
+ 
+### `kubectl get secret`
+Reads a Kubernetes Secret. Secrets store sensitive data (passwords, tokens) in base64 encoding.
+ 
+```powershell
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}"
+```
+ 
+- `-o jsonpath="{.data.password}"` — extracts just the password field instead of showing the whole secret
+---
+ 
+## The GitOps workflow (what you have now)
+ 
+```
+1. Edit k8s/base/api/deployment.yaml (change replicas, image, env vars)
+2. git add, commit, push
+3. ArgoCD detects the change (polls every 3 minutes, or click REFRESH)
+4. ArgoCD applies the change to the cluster
+5. The UI shows the new state — green = success
+```
+ 
+No more `kubectl apply` manually. Git is the only way changes reach the cluster.
+ 
+---
+ 
+## Lessons learned
+ 
+### DNS error on first sync
+ArgoCD's repo-server couldn't resolve the GitHub URL because the cluster's internal DNS (CoreDNS) wasn't fully ready. Fix: `kubectl rollout restart` on the repo-server. This is a timing issue specific to fresh clusters — in production, DNS is stable.
+ 
+### Custom Resource Definitions (CRDs)
+When you installed ArgoCD, it created new resource types (`Application`, `AppProject`) that don't exist in vanilla Kubernetes. These are CRDs — extensions to the Kubernetes API. The `applicationsets` CRD showed an error during install, but it didn't affect the core functionality.
+ 
+### ArgoCD vs GitHub Actions
+They solve different problems:
+- **GitHub Actions** (CI) = build and test your code on every push
+- **ArgoCD** (CD) = deploy the tested code to the cluster
+The full pipeline: push → GitHub Actions builds and tests → if green, ArgoCD syncs the new manifests → cluster updated. CI builds the artifact, CD delivers it.
+ 
