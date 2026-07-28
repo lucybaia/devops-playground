@@ -1417,4 +1417,256 @@ They solve different problems:
 - **GitHub Actions** (CI) = build and test your code on every push
 - **ArgoCD** (CD) = deploy the tested code to the cluster
 The full pipeline: push → GitHub Actions builds and tests → if green, ArgoCD syncs the new manifests → cluster updated. CI builds the artifact, CD delivers it.
+  
+---
  
+## Observability — What it is
+ 
+The ability to understand what's happening inside your system by looking at its outputs. In practice, it means collecting **metrics** (numbers over time), **logs** (text events), and **traces** (request paths). This phase covers metrics with Prometheus and Grafana.
+ 
+---
+ 
+## The monitoring stack
+ 
+```
+Your API (/metrics endpoint)
+  → Prometheus scrapes every 15 seconds
+    → Stores the data as time series
+      → Grafana queries Prometheus
+        → Displays charts and dashboards
+```
+ 
+Three components, each with a clear role:
+- **Prometheus** — collects and stores metrics
+- **Grafana** — visualizes them
+- **Alertmanager** — sends notifications when something goes wrong (installed but not configured yet)
+---
+ 
+## Helm
+ 
+### What it is
+A package manager for Kubernetes. Like `pip` is for Python and `npm` is for Node, Helm installs pre-configured applications into your cluster. These packages are called **charts**.
+ 
+```powershell
+helm version                    # check installation
+helm repo add <name> <url>      # add a chart repository
+helm repo update                # refresh available charts
+helm install <release> <chart>  # install a chart into the cluster
+helm list -n <namespace>        # list installed releases
+helm uninstall <release> -n <namespace>  # remove a release
+```
+ 
+### Chart
+A package of Kubernetes manifests (Deployments, Services, ConfigMaps, etc.) bundled together with default configuration. Instead of writing 20+ YAML files manually, you install a chart and customize it with flags.
+ 
+### Release
+An instance of a chart installed in your cluster. When you run `helm install monitoring prometheus-community/kube-prometheus-stack`, `monitoring` is the release name.
+ 
+### Commands used
+ 
+```powershell
+# Add the Prometheus community chart repository
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+ 
+# Install the full monitoring stack
+kubectl create namespace monitoring
+helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring --set grafana.adminPassword=admin
+```
+ 
+| Flag | What it does |
+|---|---|
+| `-n monitoring` | Install in the `monitoring` namespace |
+| `--set grafana.adminPassword=admin` | Override a chart default (sets the Grafana password) |
+ 
+---
+ 
+## Prometheus
+ 
+### What it is
+A time-series database that collects metrics by **pulling** (scraping) them from your services. Every 15 seconds (configurable), Prometheus sends an HTTP request to your app's `/metrics` endpoint, reads the response, and stores the data.
+ 
+### How metrics work
+Your API exposes a `/metrics` endpoint that returns data in a specific text format:
+ 
+```
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 8.2722816e+07
+```
+ 
+Each line has:
+- `# HELP` — human-readable description
+- `# TYPE` — the metric type (gauge, counter, histogram)
+- The metric name + labels + value
+### Metric types
+ 
+| Type | What it is | Example |
+|---|---|---|
+| **Gauge** | A value that goes up and down | Memory usage, CPU usage, temperature |
+| **Counter** | A value that only increases | Total requests, total errors, total snippets created |
+| **Histogram** | Distribution of values in buckets | Request latency (how many requests took <100ms, <500ms, etc.) |
+ 
+### `prometheus-client` (Python library)
+Adds the `/metrics` endpoint to your FastAPI app.
+ 
+```python
+from prometheus_client import make_asgi_app
+ 
+# Creates a mini ASGI app that serves metrics
+metrics_app = make_asgi_app()
+ 
+# Mount it on your FastAPI app
+app.mount("/metrics", metrics_app)
+```
+ 
+The library automatically exposes Python runtime metrics (memory, CPU, garbage collection). You can also create custom metrics:
+ 
+```python
+from prometheus_client import Counter
+ 
+SNIPPET_COUNT = Counter(
+    "devstation_snippets_created_total",
+    "Total snippets created",
+)
+ 
+# In your endpoint:
+SNIPPET_COUNT.inc()  # increments by 1
+```
+ 
+### PromQL (Prometheus Query Language)
+The language used to query metrics. Used in both the Prometheus UI and Grafana.
+ 
+```
+process_resident_memory_bytes{job="api"}           # current memory usage of the API
+rate(process_cpu_seconds_total{job="api"}[5m])      # CPU usage rate over 5 minutes
+```
+ 
+- `{job="api"}` — filter by label (only metrics from the API)
+- `rate(...[5m])` — calculate the per-second rate over a 5-minute window
+### Prometheus UI
+Available at `http://localhost:9090` (via port-forward). The `/targets` page shows all services Prometheus is scraping and their status (UP or DOWN).
+ 
+```powershell
+kubectl port-forward svc/prometheus-operated -n monitoring 9090:9090
+```
+ 
+---
+ 
+## Grafana
+ 
+### What it is
+A visualization platform. It connects to data sources (like Prometheus) and displays the data as charts, graphs, tables, and dashboards. The kube-prometheus-stack chart comes with pre-built dashboards for the Kubernetes cluster.
+ 
+### Accessing it
+ 
+```powershell
+kubectl port-forward svc/monitoring-grafana -n monitoring 3001:80
+```
+ 
+Open `http://localhost:3001`. Login: `admin` / `admin`.
+ 
+### Explore mode
+For ad-hoc queries. Click the compass icon on the left sidebar, switch from "Builder" to **Code** in the top right, and type a PromQL query:
+ 
+```
+process_resident_memory_bytes{job="api"}
+```
+ 
+Click **Run query** to see the graph.
+ 
+### Dashboards
+Pre-built views with multiple panels. The kube-prometheus-stack installs several:
+ 
+| Dashboard | What it shows |
+|---|---|
+| Kubernetes / Compute Resources / Cluster | CPU and memory usage across the whole cluster |
+| Kubernetes / Compute Resources / Namespace (Pods) | CPU and memory per pod in a namespace |
+| Kubernetes / Compute Resources / Node (Pods) | Resource usage per node |
+| CoreDNS | DNS query performance |
+| etcd | Cluster state store health |
+ 
+---
+ 
+## ServiceMonitor
+ 
+### What it is
+A custom Kubernetes resource (installed by the kube-prometheus-stack) that tells Prometheus which Services to scrape.
+ 
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      app: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+```
+ 
+### Field by field
+ 
+| Field | What it does |
+|---|---|
+| `metadata.labels.release: monitoring` | Required — Prometheus only watches ServiceMonitors with this label |
+| `spec.namespaceSelector.matchNames` | Which namespace to look for the Service in |
+| `spec.selector.matchLabels` | Finds Services with matching labels (`app: api`) |
+| `endpoints[].port: http` | The named port on the Service to scrape (must match the Service's port name) |
+| `endpoints[].path` | The HTTP path to scrape (`/metrics`) |
+| `endpoints[].interval` | How often to scrape (every 15 seconds) |
+ 
+### Why the Service needs `labels` and named `ports`
+The ServiceMonitor finds targets by matching labels on the Service's metadata and connecting to the port by name. Without these, the selector can't find anything:
+ 
+```yaml
+# Service must have:
+metadata:
+  labels:
+    app: api          # ← selector matches this
+spec:
+  ports:
+    - name: http      # ← endpoint references this name
+      port: 8000
+```
+ 
+---
+ 
+## Concepts
+ 
+### Pull vs Push
+Prometheus uses a **pull** model — it goes to your app and fetches metrics. This is different from a push model (where your app sends metrics to a collector). Pull is simpler: your app just needs to expose an HTTP endpoint, and Prometheus handles the rest.
+ 
+### Scrape
+The act of Prometheus fetching metrics from a target. Each scrape is an HTTP GET to the `/metrics` endpoint. The scrape interval (15s in our config) controls how often this happens.
+ 
+### Target
+A service that Prometheus scrapes. Shown in the Prometheus UI at `/targets` with their status:
+- **UP** — Prometheus can reach the endpoint and it's returning metrics
+- **DOWN** — the endpoint is unreachable or returning errors
+### Time series
+A sequence of data points over time, identified by a metric name and labels. Example: `process_resident_memory_bytes{job="api"}` is one time series — Prometheus stores a new value for it every 15 seconds.
+ 
+---
+ 
+## Lessons learned
+ 
+### ServiceMonitor in the wrong namespace
+The ServiceMonitor was initially created in `default`, but Prometheus (running in `monitoring`) wasn't configured to look there. Moving the ServiceMonitor to the `monitoring` namespace fixed discovery, but then it couldn't find the Service in `default`. Adding `namespaceSelector.matchNames: [default]` told it where to look.
+ 
+### ArgoCD reverts manual changes
+When we ran `kubectl apply` to fix the Service labels, ArgoCD's `selfHeal` detected the drift and reverted it because Git still had the old version. The fix: commit and push the changes so Git has the correct state. This is GitOps in action — Git is always the source of truth.
+ 
+### The `release: monitoring` label
+The kube-prometheus-stack configures Prometheus to only watch ServiceMonitors that have the label `release: monitoring`. Without this label, Prometheus ignores the ServiceMonitor entirely. This is a convention set by the Helm chart, not a Kubernetes or Prometheus requirement.
+ 
+### Named ports
+The ServiceMonitor references ports by name (`port: http`), not by number. If the Service port doesn't have a `name` field, the ServiceMonitor can't match it and the target shows as "No targets" even though everything else is correct.
