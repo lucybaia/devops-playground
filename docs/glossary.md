@@ -1670,3 +1670,297 @@ The kube-prometheus-stack configures Prometheus to only watch ServiceMonitors th
  
 ### Named ports
 The ServiceMonitor references ports by name (`port: http`), not by number. If the Service port doesn't have a `name` field, the ServiceMonitor can't match it and the target shows as "No targets" even though everything else is correct.
+ 
+---
+ 
+## Infrastructure as Code (IaC) — What it is
+ 
+The practice of defining infrastructure (servers, databases, networks) in code files instead of creating them manually. The code is versioned in Git, reviewed in PRs, and applied with a command. If you need to recreate everything from scratch, you run the same command and get an identical environment.
+ 
+---
+ 
+## Terraform — What it is
+ 
+A tool by HashiCorp that reads `.tf` files describing your desired infrastructure, compares them to the current state, and makes the necessary changes (create, update, or delete resources). It works with any cloud (Azure, AWS, GCP) and even local tools like Docker.
+ 
+---
+ 
+## The workflow
+ 
+```
+terraform init     →  downloads providers (plugins)
+terraform plan     →  shows what will change (preview, no action)
+terraform apply    →  executes the changes (creates/updates/deletes)
+terraform destroy  →  tears down everything Terraform created
+```
+ 
+This cycle is the core of Terraform. You write code, plan, review, apply. Need to change something? Edit the file, plan again, apply again. Terraform figures out the diff.
+ 
+---
+ 
+## Commands
+ 
+### `terraform init`
+Initializes the working directory. Downloads the providers (plugins) specified in the config. Run once when starting, or after adding a new provider.
+ 
+```powershell
+cd infra\terraform
+terraform init
+```
+ 
+Creates a `.terraform/` directory (providers) and a `.terraform.lock.hcl` file (version lock).
+ 
+### `terraform plan`
+Shows what Terraform will do without actually doing it. A dry run.
+ 
+```powershell
+terraform plan
+```
+ 
+Output symbols:
+- `+` — will be created
+- `~` — will be modified
+- `-` — will be destroyed
+Always plan before applying. Read the output. If it says it will destroy something you didn't expect, stop and investigate.
+ 
+### `terraform apply`
+Executes the plan. Creates, updates, or deletes resources to match the config. Asks for confirmation (`yes`) before proceeding.
+ 
+```powershell
+terraform apply
+```
+ 
+After applying, Terraform writes the current state to `terraform.tfstate` — a JSON file that tracks what it created.
+ 
+### `terraform destroy`
+Deletes everything Terraform created. The inverse of apply. Also asks for confirmation.
+ 
+```powershell
+terraform destroy
+```
+ 
+---
+ 
+## Configuration file (`main.tf`)
+ 
+### Structure
+ 
+```hcl
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    docker = {
+      source  = "kreuzwerker/docker"
+      version = "~> 3.0"
+    }
+  }
+}
+ 
+provider "docker" {}
+ 
+resource "docker_network" "devstation" {
+  name = "devstation-network"
+}
+ 
+resource "docker_container" "api" {
+  name  = "devstation-tf-api"
+  image = docker_image.api.image_id
+  ...
+}
+ 
+output "api_url" {
+  value = "http://localhost:8001"
+}
+```
+ 
+### Blocks explained
+ 
+| Block | What it does |
+|---|---|
+| `terraform {}` | Global settings: required version and providers |
+| `provider` | Configures the plugin that talks to the target platform (Docker, Azure, AWS) |
+| `resource` | Declares a piece of infrastructure to create |
+| `output` | Prints values after apply (URLs, IPs, names) |
+ 
+---
+ 
+## Provider
+ 
+A plugin that connects Terraform to a platform. Each provider knows how to create, read, update, and delete resources on that platform.
+ 
+```hcl
+required_providers {
+  docker = {
+    source  = "kreuzwerker/docker"    # where to download it
+    version = "~> 3.0"                # acceptable versions
+  }
+}
+ 
+provider "docker" {}   # configure it (empty = defaults)
+```
+ 
+Examples of providers:
+- `kreuzwerker/docker` — manages Docker containers, images, networks
+- `hashicorp/azurerm` — manages Azure resources (VMs, AKS, databases)
+- `hashicorp/aws` — manages AWS resources (EC2, EKS, RDS)
+Switching from local Docker to Azure means changing the provider and resource types. The workflow (init, plan, apply) stays the same.
+ 
+---
+ 
+## Resource
+ 
+A single piece of infrastructure. The syntax is:
+ 
+```hcl
+resource "type" "name" {
+  argument = value
+}
+```
+ 
+- `type` — what to create (defined by the provider). Examples: `docker_container`, `docker_network`, `docker_image`
+- `name` — your label for this resource (used to reference it in other resources)
+- arguments — configuration specific to that resource type
+### Examples from our config
+ 
+**Network:**
+```hcl
+resource "docker_network" "devstation" {
+  name = "devstation-network"
+}
+```
+ 
+**Image:**
+```hcl
+resource "docker_image" "postgres" {
+  name = "postgres:16-alpine"
+}
+```
+ 
+**Container:**
+```hcl
+resource "docker_container" "db" {
+  name  = "devstation-tf-db"
+  image = docker_image.postgres.image_id
+ 
+  env = [
+    "POSTGRES_USER=devstation",
+    "POSTGRES_PASSWORD=changeme",
+    "POSTGRES_DB=devstation",
+  ]
+ 
+  ports {
+    internal = 5432
+    external = 5433
+  }
+ 
+  networks_advanced {
+    name = docker_network.devstation.name
+  }
+}
+```
+ 
+### Referencing other resources
+Resources reference each other using `type.name.attribute`:
+ 
+```hcl
+image = docker_image.postgres.image_id
+# reads the image_id from the docker_image resource named "postgres"
+ 
+name = docker_network.devstation.name
+# reads the name from the docker_network resource named "devstation"
+```
+ 
+Terraform uses these references to figure out the dependency order. It knows to create the image before the container, and the network before anything that connects to it.
+ 
+### `depends_on`
+Explicit dependency when Terraform can't infer it from references.
+ 
+```hcl
+resource "docker_container" "api" {
+  ...
+  depends_on = [docker_container.db]
+}
+```
+ 
+The API container won't be created until the DB container exists.
+ 
+---
+ 
+## Output
+ 
+Prints useful values after `terraform apply`.
+ 
+```hcl
+output "api_url" {
+  value = "http://localhost:8001"
+}
+```
+ 
+Shows:
+```
+Outputs:
+  api_url = "http://localhost:8001"
+  db_port = "localhost:5433"
+```
+ 
+Useful for sharing connection details, especially in automated pipelines.
+ 
+---
+ 
+## State (`terraform.tfstate`)
+ 
+A JSON file that records what Terraform has created. It maps your config to real resources. Terraform reads this file on every plan/apply to know what already exists.
+ 
+**Important rules:**
+- Never edit it manually
+- Add it to `.gitignore` (it can contain sensitive data like passwords)
+- In a team, store it remotely (Azure Blob Storage, S3) so everyone shares the same state
+---
+ 
+## Concepts
+ 
+### Declarative vs Imperative
+Terraform is **declarative**: you describe the desired end state ("I want 2 containers and 1 network"), not the steps to get there. Terraform figures out the steps. This is different from imperative tools (scripts, `kubectl` commands) where you tell it exactly what to do step by step.
+ 
+### Idempotent
+Running `terraform apply` multiple times with the same config produces the same result. If everything already exists, Terraform does nothing. If one container was deleted, Terraform recreates just that one.
+ 
+### Plan before apply
+The plan step is a safety net. It shows you exactly what will happen before it happens. In production, this is where you catch mistakes — "wait, it's going to destroy my database? Let me fix the config first."
+ 
+### Local vs Cloud
+We used the Docker provider to learn Terraform locally. In production, you'd swap to a cloud provider:
+ 
+```hcl
+# Local (what we did)
+provider "docker" {}
+resource "docker_container" "api" { ... }
+ 
+# Azure (what production looks like)
+provider "azurerm" { features {} }
+resource "azurerm_kubernetes_cluster" "main" { ... }
+```
+ 
+The workflow doesn't change — only the provider and resource types.
+ 
+---
+ 
+## Files generated by Terraform
+ 
+| File | What it is | Git? |
+|---|---|---|
+| `main.tf` | Your infrastructure config | Yes |
+| `terraform.tfstate` | Current state of real resources | No (`.gitignore`) |
+| `terraform.tfstate.backup` | Previous state backup | No |
+| `.terraform/` | Downloaded providers | No |
+| `.terraform.lock.hcl` | Provider version lock | Yes |
+ 
+---
+ 
+## Lessons learned
+ 
+### Different ports to avoid conflicts
+We used ports 8001 and 5433 for the Terraform-managed containers because 8000 and 5432 were already in use by the Kubernetes cluster. Terraform would fail to bind ports that are already allocated — same error we saw with Docker earlier.
+ 
+### Destroy and recreate
+`terraform destroy` followed by `terraform apply` gives you a fresh environment in seconds. This is the power of IaC — infrastructure becomes disposable and reproducible. No more "works on my machine" because the environment is defined in code.
